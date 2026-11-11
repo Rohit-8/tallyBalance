@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Semantic tokens referenced by tailwind.config.js. Declared as HSL channels so
+     Tailwind and shadcn/ui can both apply opacity modifiers to them. */
+  --surface: 0 0% 100%;
+  --foreground: 222 47% 11%;
+  --muted: 210 40% 96%;
+  --border: 214 32% 91%;
+  --positive: 142 71% 35%;
+  --negative: 0 72% 45%;
+  --pending: 38 92% 45%;
+  --brand: 221 83% 45%;
+
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: hsl(var(--surface));
+  color: hsl(var(--foreground));
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Applied to every monetary value. Tabular figures keep a column of rupee amounts
+   aligned on the decimal point; without it, proportional digit widths make a table of
+   totals look wrong even when every number is correct. Right-alignment is not a style
+   preference either — it lets a reviewer compare magnitudes by column, which is how
+   accounts payable staff actually read these screens. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+}

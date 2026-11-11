@@ -1,0 +1,69 @@
+name: CI
+
+# Phase 1 skeleton. The important property of this file is not that it is complete —
+# it is that it exists and is correct in the parts that matter:
+#
+# - It builds and tests the .NET solution on every push and pull request.
+# - It runs the architecture tests, which are the ones that must fail CI on a
+#   dependency violation. A CI that skips them is a CI that does not protect the
+#   architecture.
+# - It does NOT try to run the integration tests against real infrastructure. Those
+#   need SQL Server and Redis; a CI that spins up a full Podman stack on every push
+#   is slow and flaky. The integration tests boot the API in-process but only call
+#   /health/live (which runs no dependency checks), /api/v1/system/status, /openapi,
+#   and a 404 route — never /health/ready — so they pass with no containers present.
+#   The container-backed path is covered by the local compose smoke test and, from
+#   Phase 2, by Testcontainers-based tests.
+#
+# The frontend build is included because a TypeScript error that only shows up in the
+# editor is a real regression, and the only way to catch it in CI is to run the build.
+
+on:
+  push:
+    branches: [main-]
+  pull_request:
+    branches: [main-]
+
+jobs:
+  build-and-test:
+    name: Build and test (.NET)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test
+        # --no-build reuses the build above. The architecture tests are the ones that
+        # must fail CI on a dependency violation; they run here like any other test.
+        run: dotnet test --no-build --configuration Release
+
+  frontend:
+    name: Build (frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-file: client/package-lock.json
+
+      - name: Install
+        working-directory: client
+        run: npm ci
+
+      - name: Typecheck and build
+        working-directory: client
+        run: npm run build

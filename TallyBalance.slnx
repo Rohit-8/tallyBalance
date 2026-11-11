@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TallyBalance.Api/TallyBalance.Api.csproj" />
+    <Project Path="src/TallyBalance.Application/TallyBalance.Application.csproj" />
+    <Project Path="src/TallyBalance.Domain/TallyBalance.Domain.csproj" />
+    <Project Path="src/TallyBalance.Infrastructure/TallyBalance.Infrastructure.csproj" />
+    <Project Path="src/TallyBalance.Worker/TallyBalance.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TallyBalance.ArchitectureTests/TallyBalance.ArchitectureTests.csproj" />
+    <Project Path="tests/TallyBalance.IntegrationTests/TallyBalance.IntegrationTests.csproj" />
+    <Project Path="tests/TallyBalance.UnitTests/TallyBalance.UnitTests.csproj" />
+  </Folder>
+</Solution>

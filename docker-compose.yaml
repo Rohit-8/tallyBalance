@@ -1,0 +1,222 @@
+# Local development infrastructure — runs on the PODMAN engine, not Docker.
+#
+# ---------------------------------------------------------------------------
+# HOW TO RUN (this machine has no Docker; do not assume it exists)
+#
+#   podman machine start          # if the VM is not running
+#   docker-compose up -d          # docker-compose drives Podman over the
+#                                 # Docker-compatible npipe; DOCKER_HOST is set
+#                                 # in the user environment to
+#                                 # npipe:////./pipe/docker_engine
+#
+# Verified working on this machine: docker-compose v2.39.4 against Podman 6.0.2
+# (WSL machine, 8 GiB). See docs/adr/ADR-008-container-runtime-podman.md.
+# ---------------------------------------------------------------------------
+#
+# Memory: this stack is sized for the 8 GiB WSL machine configured in
+# %USERPROFILE%\.wslconfig. SQL Server for Linux alone reserves ~2 GiB, which is
+# why the machine was raised from its 2 GiB default — at that size SQL Server
+# starts and then dies during recovery, which looks like a compose bug and is not.
+#
+# Ports are bound to localhost (127.0.0.1) explicitly. Without the prefix, Podman
+# and Docker both publish on 0.0.0.0, which would put an unauthenticated Redis and
+# a sa-credentialed SQL Server on the office network. That is the single most
+# common way a "local only" dev stack becomes an exposed one.
+
+name: tallybalance
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: tallybalance-mssql
+    # No 'command:' override. The SQL Server image is configured entirely through
+    # environment variables and its own entrypoint; passing "-e KEY=VALUE" as command
+    # arguments — a habit from images that do take CLI flags — makes the entrypoint
+    # try to execute "-e" as a program and the container exits 127 within a second.
+    # The error ("line 20: -e: command not found") reads like a broken image, which is
+    # precisely the kind of failure that costs an afternoon if written from memory.
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      MSSQL_PID: "Developer"
+      # SQL Server's own timezone stays UTC. Application code converts. A database
+      # running on local time makes every audit timestamp ambiguous and breaks
+      # ordering during any DST-observing region's rollback — and India has no DST,
+      # so the only correct answer for this product is UTC everywhere at rest.
+      TZ: "UTC"
+    ports:
+      - "127.0.0.1:1433:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      # The 2022 image ships neither sqlcmd nor curl, so a query-based or HTTP probe is
+      # not available without building a derived image. This uses bash's /dev/tcp to make
+      # a real TCP connection to the listener: it succeeds only once SQL Server is
+      # actually accepting connections, so it is a genuine test rather than a check that
+      # always passes.
+      #
+      # It is still weaker than running a query — it proves the endpoint accepts sockets,
+      # not that a database can be opened — and that gap is stated rather than hidden.
+      # The practical consequence is that a dependent service could start against a SQL
+      # Server still finishing recovery. EF Core's execution retry (enabled in Phase 2)
+      # is what absorbs that window, and it is the right mechanism anyway because the
+      # same race exists against managed SQL in production.
+      #
+      # If a stricter probe is ever needed, install mssql-tools in a derived image rather
+      # than weakening this one.
+      test:
+        [
+          "CMD",
+          "/bin/bash",
+          "-c",
+          "(exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: tallybalance-redis
+    command:
+      [
+        "redis-server",
+        "--appendonly", "yes",
+        "--maxmemory", "256mb",
+        "--maxmemory-policy", "allkeys-lru",
+      ]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  rabbitmq:
+    # Management tag included: the UI on :15672 is how a developer sees whether a
+    # message was actually published, which is otherwise guesswork when the
+    # outbox processor and a consumer disagree.
+    image: docker.io/library/rabbitmq:3.13-management-alpine
+    container_name: tallybalance-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-tallybalance}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      # Checks the broker is accepting connections, not merely that Erlang started.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  qdrant:
+    # Vector store for the AI phases (11+). Running it from Phase 1 costs little and
+    # means the embedding pipeline is never blocked on infrastructure, but nothing
+    # in the current phase depends on it — which is why it is absent from the API's
+    # readiness probe.
+    image: docker.io/qdrant/qdrant:v1.12.4
+    container_name: tallybalance-qdrant
+    environment:
+      # Telemetry off: a local dev container should not phone home, and a corporate
+      # network may block it in a way that looks like a startup failure.
+      QDRANT__TELEMETRY_DISABLED: "true"
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  minio:
+    # Object store chosen for document storage (Phase 6). Application code reaches
+    # it only through IFileStorageService, so this container is swappable for S3 or
+    # Azure Blob without touching a use case.
+    #
+    # IMAGE SOURCE NOTE (verified 2026-11-10). The official docker.io/minio/minio and
+    # minio/mc images are no longer pullable — "requested access to the resource is
+    # denied" — because the MinIO project was archived on GitHub in April 2026 and its
+    # public registry access was withdrawn. This is the maintained redistribution of the
+    # same AGPLv3 codebase, and it reports itself as a genuine MinIO server
+    # (RELEASE.2026-08-04T00-00-00Z). It was not adopted on trust: a container was run
+    # and a real S3 round-trip completed (create bucket, upload object, read it back).
+    #
+    # The image is pinned rather than :latest. For an object store holding invoice
+    # documents, an unreviewed upstream change arriving overnight is worse than a
+    # deliberate upgrade, and a floating tag makes a build non-reproducible.
+    #
+    # If this mirror ever disappears, the replacement path is already designed in:
+    # implement IFileStorageService against another S3-compatible store, or against
+    # local disk for development. No use case changes.
+    image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: tallybalance-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-tallybalance}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      # 'mc ready local' is the vendor's own readiness check and is present in this
+      # image. It is preferred over curling /minio/health/live because it verifies the
+      # server can actually service storage operations, not merely that the listener is
+      # open — the same distinction that makes the SQL Server check run a query rather
+      # than test that the port exists.
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Creates the application database and the document bucket once, then exits.
+  # Seeding lives here rather than in the API because a container that mutates
+  # shared infrastructure at request time produces a cold-start race the moment a
+  # second instance starts.
+  bootstrap:
+    image: docker.io/library/alpine:3.20
+    container_name: tallybalance-bootstrap
+    depends_on:
+      mssql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        echo "Infrastructure is up. Database 'TallyBalance' will be created by EF Core migrations."
+        echo "MinIO bucket 'tallybalance-documents' is created on first upload in Phase 6."
+        exit 0
+    restart: "no"
+volumes:
+  mssql-data:
+  redis-data:
+  rabbitmq-data:
+  qdrant-data:
+  minio-data:
